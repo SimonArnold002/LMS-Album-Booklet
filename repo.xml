@@ -6,7 +6,7 @@
     <plugin name="AlbumBooklet" version="0.1.0" minTarget="9.0.0" maxTarget="*">
       <title lang="EN">Album Booklet</title>
       <desc lang="EN">View a PDF booklet from the playing album's folder, from Material Skin's Now Playing menu</desc>
-      <url>https://simonarnold002.github.io/LMS-Album-Booklet/AlbumBooklet.zip</url>
+      <url>https://raw.githubusercontent.com/SimonArnold002/LMS-Album-Booklet/dev/AlbumBooklet.zip</url>
       <link>https://simonarnold002.github.io/LMS-Album-Booklet/README.html</link>
       <creator>CrystalGipsy</creator>
       <email></email>
