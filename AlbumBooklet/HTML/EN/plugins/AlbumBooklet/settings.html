@@ -1,0 +1,18 @@
+[% PROCESS settings/header.html %]
+
+<h2>[% 'PLUGIN_ALBUMBOOKLET' | string %]</h2>
+
+[% WRAPPER setting title="PLUGIN_ALBUMBOOKLET_MATERIAL" desc="PLUGIN_ALBUMBOOKLET_MATERIAL_DESC" %]
+<input type="checkbox" name="pref_material_action" value="1" [% IF prefs.material_action %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_ALBUMBOOKLET_OPENMODE" desc="PLUGIN_ALBUMBOOKLET_OPENMODE_DESC" %]
+<div>
+  <label><input type="radio" name="pref_open_mode" value="iframe"  [% IF prefs.open_mode == 'iframe'  %]checked="checked"[% END %]> [% 'PLUGIN_ALBUMBOOKLET_MODE_IFRAME'  | string %]</label><br>
+  <label><input type="radio" name="pref_open_mode" value="weblink" [% IF prefs.open_mode == 'weblink' %]checked="checked"[% END %]> [% 'PLUGIN_ALBUMBOOKLET_MODE_WEBLINK' | string %]</label>
+</div>
+[% END %]
+
+<p style="margin-top:1em;opacity:.75;">[% 'PLUGIN_ALBUMBOOKLET_HINT' | string %]</p>
+
+[% PROCESS settings/footer.html %]

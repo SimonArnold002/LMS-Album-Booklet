@@ -1,0 +1,38 @@
+PLUGIN_ALBUMBOOKLET
+	EN	Album Booklet
+
+PLUGIN_ALBUMBOOKLET_DESC
+	EN	Adds a "View Booklet" entry to Material Skin's Now Playing menu that opens a PDF booklet found in the currently-playing album's folder.
+
+PLUGIN_ALBUMBOOKLET_VIEW
+	EN	View Booklet
+
+PLUGIN_ALBUMBOOKLET_CHOOSE
+	EN	Choose a booklet
+
+PLUGIN_ALBUMBOOKLET_NONE
+	EN	No booklet (PDF) found in this album's folder.
+
+PLUGIN_ALBUMBOOKLET_NO_TRACK
+	EN	No local album is playing. A booklet can only be shown for a track from your library.
+
+PLUGIN_ALBUMBOOKLET_MATERIAL
+	EN	Show "View Booklet" on Now Playing
+
+PLUGIN_ALBUMBOOKLET_MATERIAL_DESC
+	EN	Add the "View Booklet" entry to Material Skin's Now Playing "…" menu. After changing this, hard-refresh Material once (it caches custom actions when the app loads).
+
+PLUGIN_ALBUMBOOKLET_OPENMODE
+	EN	Open booklet in
+
+PLUGIN_ALBUMBOOKLET_OPENMODE_DESC
+	EN	Whether the PDF opens inside a Material dialog (in-app) or in a new browser tab.
+
+PLUGIN_ALBUMBOOKLET_MODE_IFRAME
+	EN	In-app dialog (iframe)
+
+PLUGIN_ALBUMBOOKLET_MODE_WEBLINK
+	EN	New browser tab
+
+PLUGIN_ALBUMBOOKLET_HINT
+	EN	The entry always appears while a track is playing; if the album folder has no PDF it shows a short "no booklet" message. Booklets are read from local library folders only.
