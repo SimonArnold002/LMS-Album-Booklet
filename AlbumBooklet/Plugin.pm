@@ -15,8 +15,9 @@ package Plugins::AlbumBooklet::Plugin;
 #      it back inline. Technique mirrors the MusicArtistInfo (MAI) plugin's LocalFile.pm:
 #      Slim::Utils::Misc::pathFromFileURL + Slim::Web::HTTP::sendStreamingFile(..,'noAttachment').
 #
-# open_mode pref chooses how Material opens the URL: 'iframe' (in-app dialog) or 'weblink'
-# (new browser tab). Both are stock Material custom-action fields (customactions.js).
+# The action always opens the URL in a new browser tab (Material 'weblink' field): the
+# browser's native PDF viewer gives full page navigation, whereas Material's in-app iframe
+# dialog stranded multi-page booklets on page one.
 
 use strict;
 
@@ -50,7 +51,6 @@ my $prefs = preferences('plugin.albumbooklet');
 
 $prefs->init({
     material_action => 1,        # write the Now Playing "View Booklet" custom action
-    open_mode       => 'iframe', # iframe | weblink
 });
 
 # The path our raw HTTP handler answers on. Deliberately NOT under /plugins/ so it can't
@@ -152,25 +152,26 @@ sub _writeMaterialAction {
     my $data = _readMaterialActions($file);
 
     # Strip any prior entry of ours from every category first (idempotent re-writes,
-    # and clears a stale entry if open_mode changed field).
+    # and clears a legacy pre-0.1.1 'iframe' entry on upgrade — _isOurAction matches both fields).
     for my $cat (keys %$data) {
         next unless ref $data->{$cat} eq 'ARRAY';
         $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
     }
 
-    my $mode = $prefs->get('open_mode') eq 'weblink' ? 'weblink' : 'iframe';
     # $ID is substituted by Material with the current player id (customactions.js
     # doReplacements). The Now Playing item has no album_id, so the player is the key.
     my $url  = URL_PATH . '?player=$ID';
 
+    # Always 'weblink' (new browser tab) — the browser's PDF viewer can page through a
+    # multi-page booklet; Material's 'iframe' dialog cannot, so it is no longer offered.
     push @{ $data->{track} ||= [] }, {
-        title  => cstring(undef, 'PLUGIN_ALBUMBOOKLET_VIEW'),
-        icon   => 'picture_as_pdf',
-        $mode  => $url,
+        title   => cstring(undef, 'PLUGIN_ALBUMBOOKLET_VIEW'),
+        icon    => 'picture_as_pdf',
+        weblink => $url,
     };
 
     _writeMaterialActionsFile($file, $data);
-    $log->info("AlbumBooklet: wrote Material '$mode' custom action to $file");
+    $log->info("AlbumBooklet: wrote Material 'weblink' custom action to $file");
     return;
 }
 
@@ -204,51 +205,158 @@ sub _serveBooklet {
     my %q       = $request->uri->query_form;
 
     my $client = $q{player} ? Slim::Player::Client::getClient($q{player}) : undef;
-    my $folder = $client ? _nowPlayingFolder($client) : undef;
+    my ($folder, $disc) = $client ? _nowPlaying($client) : ();
 
     if (!$folder) {
         return _sendHtml($httpClient, $response,
             _msgPage(cstring(undef, 'PLUGIN_ALBUMBOOKLET_NO_TRACK')));
     }
 
-    my @pdfs = _findPdfs($folder);
+    my @pdfs = _findPdfs($folder, $disc);
     if (!@pdfs) {
         return _sendHtml($httpClient, $response,
             _msgPage(cstring(undef, 'PLUGIN_ALBUMBOOKLET_NONE')));
     }
 
-    # A specific file was requested from the multi-PDF index page. Compare by basename
-    # against the folder's own PDF list so a crafted `file` param can't escape the folder.
+    # Stable id per PDF (basename, or "<parent>/<basename>" when basenames collide across
+    # subfolders). The list is regenerated deterministically here, so a requested id can
+    # only ever resolve to one of our own candidate paths — a crafted `file` can't traverse.
+    my $labels = _pdfLabels(\@pdfs);
+
     if (defined $q{file} && length $q{file}) {
-        my ($match) = grep { basename($_) eq $q{file} } @pdfs;
+        my ($match) = grep { $labels->{$_} eq $q{file} } @pdfs;
         return _streamFile($httpClient, $response, $match) if $match;
     }
 
     return _streamFile($httpClient, $response, $pdfs[0]) if @pdfs == 1;
 
     # Several booklets: show a small index linking each one.
-    return _sendHtml($httpClient, $response, _indexPage($q{player}, \@pdfs));
+    return _sendHtml($httpClient, $response, _indexPage($q{player}, \@pdfs, $labels));
 }
 
-# The filesystem folder of the track currently playing on $client, or undef for a remote
-# / stopped / streaming track (no local folder to hold a booklet).
-sub _nowPlayingFolder {
+# The currently-playing track's ($folder, $disc) on $client — folder = the filesystem
+# folder holding the playing file, disc = its disc number (for per-disc booklet matching).
+# Returns empty for a remote / stopped / streaming track (no local folder holds a booklet).
+sub _nowPlaying {
     my ($client) = @_;
     my $song  = $client->playingSong    or return;
     my $track = $song->currentTrack     or return;
     my $url   = $track->url             or return;
     return unless $url =~ m{^file://}i;
     my $path = Slim::Utils::Misc::pathFromFileURL($url) or return;
-    return -d $path ? $path : dirname($path);
+    my $folder = -d $path ? $path : dirname($path);
+
+    # Disc number: prefer the tagged value; fall back to a cd/disc marker in the filename
+    # then the folder name (for rips tagged only via layout, e.g. a "CD2" subfolder).
+    my $disc = $track->disc;
+    if (!$disc) {
+        for my $name (basename($path), basename($folder)) {
+            ($disc) = $name =~ /\b(?:cd|disc|disk)\s*0*(\d+)/i and last;
+        }
+    }
+    return ($folder, $disc);
 }
 
-# All *.pdf in a folder (skipping macOS AppleDouble ._ sidecars), full paths, sorted.
+# Booklet PDFs relevant to the playing track, using a nearest-first strategy so it works
+# across the common single-album and boxset layouts with no configuration:
+#   1. the track's own folder            (ordinary albums; per-disc-folder boxsets)
+#   2. else its subfolders               (booklets kept in Scans/ Artwork/ Booklet/ …)
+#   3. else the parent folder + its subs (one booklet in a boxset root above disc folders)
+# Then, when >1 PDF survives and the disc number is known, keep only those whose filename
+# names that disc (falling back to all of them if none match).
 sub _findPdfs {
-    my ($folder) = @_;
-    opendir(my $dh, $folder) or return ();
+    my ($folder, $disc) = @_;
+
+    my @found = _pdfsIn($folder);
+    @found    = _pdfsBelow($folder) unless @found;
+
+    # Track sits in a disc subfolder with no booklet of its own: the boxset's shared
+    # booklet may live one level up. Only climb when THIS folder is itself a disc folder
+    # (CD2 / Disc 2 / …), so an ordinary album with no booklet never scoops up sibling
+    # albums' PDFs from a shared parent (an Artist or library-root folder).
+    if (!@found && basename($folder) =~ /\b(?:cd|disc|disk)\s*0*\d+/i) {
+        my $parent = dirname($folder);
+        if ($parent && $parent ne $folder) {
+            @found = _pdfsIn($parent);
+            @found = _pdfsBelow($parent) unless @found;
+        }
+    }
+
+    return _preferDisc(\@found, $disc);
+}
+
+# *.pdf directly in $dir (skipping macOS AppleDouble ._ sidecars), full paths, sorted.
+sub _pdfsIn {
+    my ($dir) = @_;
+    opendir(my $dh, $dir) or return ();
     my @files = sort grep { !/^\._/ && /\.pdf$/i } readdir($dh);
     closedir($dh);
-    return map { File::Spec->catfile($folder, $_) } @files;
+    return map { File::Spec->catfile($dir, $_) } @files;
+}
+
+# *.pdf anywhere BELOW $dir (its subfolders, recursively), full paths. Bounded to SCAN_DEPTH
+# folder levels so an ordinary no-booklet album (the common case, reached on every tap) can't
+# walk an arbitrarily deep tree — SCAN_DEPTH still comfortably reaches Scans/Artwork/Booklet/…
+# and, on the boxset-root climb, each disc folder's own booklet subfolder.
+use constant SCAN_DEPTH => 4;
+
+sub _pdfsBelow {
+    my ($dir, $depth) = @_;
+    $depth = SCAN_DEPTH unless defined $depth;
+    return () if $depth <= 0;
+    opendir(my $dh, $dir) or return ();
+    my @subs = sort grep { !/^\.\.?$/ && !/^\._/ } readdir($dh);
+    closedir($dh);
+    my @pdfs;
+    for my $s (@subs) {
+        my $p = File::Spec->catdir($dir, $s);
+        push @pdfs, _pdfsIn($p), _pdfsBelow($p, $depth - 1) if -d $p;
+    }
+    return @pdfs;
+}
+
+# Given >1 PDF and a known disc number, keep only those whose basename names that disc
+# (cd1 / disc 1 / disk01 …). Falls back to the full list when nothing matches or the disc is
+# unknown, so a single generic "booklet.pdf" is always still shown. The marker must be a
+# cd/disc/disk word — a bare "d<n>" is deliberately NOT matched, as it collides with Deutsch
+# / catalogue numbers common in classical booklet names (e.g. "Symphony D2.pdf").
+sub _preferDisc {
+    my ($pdfs, $disc) = @_;
+    return @$pdfs unless $disc && @$pdfs > 1;
+    my @m = grep { basename($_) =~ /\b(?:cd|disc|disk)\s*0*\Q$disc\E\b/i } @$pdfs;
+    return @m ? @m : @$pdfs;
+}
+
+# path => display id for the multi-booklet chooser. Each id is the shortest trailing run of
+# path components that is unique across the candidate list, so booklets sharing a basename
+# grow their label up to the folder that tells them apart — e.g. one shared "booklet.pdf" per
+# disc kept in identically-named subfolders (…/CD1/booklet/booklet.pdf, …/CD2/booklet/…) is
+# labelled by its disc folder, not collapsed onto the first. Ids are matchable: the same list
+# is regenerated on the serve request, so a chosen id resolves to exactly one candidate path.
+sub _pdfLabels {
+    my ($pdfs) = @_;
+    my %parts = map { $_ => [ File::Spec->splitdir($_) ] } @$pdfs;
+
+    my %label;
+    for my $p (@$pdfs) {
+        my $max   = scalar @{ $parts{$p} };
+        my $depth = 1;                                  # basename only, then widen on clash
+        while ( $depth < $max
+             && grep { $_ ne $p
+                    && _pathTail($parts{$_}, $depth) eq _pathTail($parts{$p}, $depth) } @$pdfs ) {
+            $depth++;
+        }
+        $label{$p} = _pathTail($parts{$p}, $depth);
+    }
+    return \%label;
+}
+
+# The last $depth components of a splitdir list, joined with '/' (capped at the list length).
+sub _pathTail {
+    my ($parts, $depth) = @_;
+    my $n = scalar @$parts;
+    $depth = $n if $depth > $n;
+    return join('/', @{$parts}[ $n - $depth .. $n - 1 ]);
 }
 
 sub _mimeType {
@@ -311,11 +419,11 @@ sub _msgPage {
 }
 
 sub _indexPage {
-    my ($player, $pdfs) = @_;
+    my ($player, $pdfs, $labels) = @_;
     my $title = _htmlEscape(cstring(undef, 'PLUGIN_ALBUMBOOKLET_CHOOSE'));
     my $links = '';
     for my $p (@$pdfs) {
-        my $name = basename($p);
+        my $name = $labels->{$p};
         my $href = URL_PATH . '?player=' . uri_escape_utf8($player)
                  . '&file=' . uri_escape_utf8($name);
         $links .= "<a href='" . _htmlEscape($href) . "'>" . _htmlEscape($name) . "</a>";
