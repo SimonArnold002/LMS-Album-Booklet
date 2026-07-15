@@ -4,9 +4,11 @@
 A small, self-contained plugin for Lyrion Music Server (LMS) that adds a **View Booklet**
 entry to Material Skin's **Now Playing** "…" menu. When a **local library** track is
 playing, it looks in that album's folder for a **PDF booklet** (the digital booklet many
-hi-res / Bandcamp downloads ship with) and opens it — either in an in-app Material dialog
-(iframe) or a new browser tab (weblink). Targets LMS 9.x, Material Skin 6.4.3+. No extra
-server software (no Ghostscript / ImageMagick / indexing).
+hi-res / Bandcamp downloads ship with) and opens it in a new browser tab (the browser's
+native PDF viewer pages through multi-page booklets). It searches the album folder, its
+subfolders, and — for a track in a disc folder — the boxset root, preferring a PDF that
+names the playing disc. Targets LMS 9.x, Material Skin 6.4.3+. No extra server software
+(no Ghostscript / ImageMagick / indexing).
 
 ## Server Details (shared DietPi box — same as the sibling plugins)
 - **LMS Server**: 192.168.1.234:9000 (test via hostname `http://plex:9000` — works on/off network)
@@ -43,7 +45,7 @@ Ownership must be `squeezeboxserver:nogroup`; the zip extracts directly as `Albu
 ```
 AlbumBooklet/
 ├── Plugin.pm      # writes the Material custom action; registers the raw HTTP handler that serves the PDF
-├── Settings.pm    # Slim::Web::Settings: material_action toggle + open_mode (iframe|weblink)
+├── Settings.pm    # Slim::Web::Settings: material_action toggle (open_mode removed in 0.1.1)
 ├── strings.txt    # PLUGIN_ALBUMBOOKLET_* strings (EN)
 ├── install.xml    # <extension> singular; icon = AlbumBookletIcon_svg.png; optionsURL
 └── HTML/EN/plugins/AlbumBooklet/
@@ -59,9 +61,10 @@ Repo root also has `repo.xml`, `README.md`, `AlbumBooklet.zip`.
    entry appears there and nowhere else — the queue uses `queue-track`, browse lists
    `album-track`/`playlist-track`, streaming `online-track`. (Verified against the sibling
    Listen Later plugin's 0.1.62–0.1.64 notes.)
-   - The action's open field is `iframe` **or** `weblink` per the `open_mode` pref — both are
-     stock Material custom-action fields (`customactions.js::doCustomAction`: `iframe` →
-     `bus.$emit('dlg.open','iframe',url,title)`, `weblink` → `window.open(url)`).
+   - The action's open field is always `weblink` (a stock Material custom-action field —
+     `customactions.js::doCustomAction`: `weblink` → `window.open(url)`), so the PDF opens in a
+     new browser tab. The `iframe` field (`bus.$emit('dlg.open','iframe',url,title)`) was dropped
+     in 0.1.1 because its dialog gives multi-page PDFs no page controls.
    - The URL is `/albumbooklet/booklet?player=$ID`. **`$ID` = the current player id**, NOT
      `$ALBUMID` — the Now Playing item exposes `album`/`artist`/`title` but **no `album_id`
      and no favurl** (Listen Later 0.1.64), so the player is the only usable key. `$ID` is
@@ -111,11 +114,43 @@ Repo root also has `repo.xml`, `README.md`, `AlbumBooklet.zip`.
   empty after stripping ours.
 
 ## Prefs Namespace
-`plugin.albumbooklet` — `material_action` (write the action, default on), `open_mode`
-(`iframe`|`weblink`, default `iframe`). Settings save re-runs `syncMaterialAction` so the change
+`plugin.albumbooklet` — `material_action` (write the action, default on). `open_mode` was
+removed in 0.1.1 (always `weblink`). Settings save re-runs `syncMaterialAction` so the change
 lands immediately (then hard-refresh Material for the cache).
 
 ## Version History
+- **0.1.2** — Review hardening (behaviour unchanged for cleanly-named libraries).
+  - **Chooser labels guaranteed unique** (`_pdfLabels` rewrite + `_pathTail`): each id is the
+    shortest trailing run of path components unique across the candidate list. Fixes a latent case
+    where booklets sharing a basename AND parent-folder name (…/CD1/booklet/booklet.pdf,
+    …/CD2/booklet/booklet.pdf, reached on the boxset-root climb) collapsed onto one reachable entry.
+  - **`_preferDisc` no longer matches a bare `d<n>`** — collided with Deutsch/catalogue numbers in
+    classical booklet names ("Symphony D2.pdf"); now requires a cd/disc/disk word.
+  - **`_pdfsBelow` bounded to `SCAN_DEPTH` (4) levels** — a no-booklet album (common, hit on every
+    tap) no longer walks an arbitrarily deep subtree; still reaches Scans/Artwork/Booklet/… and the
+    per-disc booklet subfolder on the climb. Isolated tests: `scratchpad/t3.pl`.
+- **0.1.1** — Boxset / subfolder support + always-browser-tab.
+  - **Nearest-first PDF search** (`_findPdfs($folder,$disc)`): (1) the track's own folder,
+    (2) else its subfolders (`_pdfsBelow`, recursive — booklets in Scans/Artwork/"album art"/
+    Booklet/…), (3) else — **only when the track's own folder name is itself a disc folder**
+    (`\b(?:cd|disc|disk)\s*0*\d+`) — climb to the parent + its subs (one shared booklet in a
+    boxset root above disc folders). The disc-folder gate is essential: without it an ordinary
+    album with no booklet would scoop every sibling album's PDF from a shared Artist/library-root
+    parent. `_pdfsIn` = the old non-recursive glob; `_pdfsBelow` = subfolders only.
+  - **Per-disc tie-break** (`_preferDisc`): when >1 PDF survives and the disc number is known,
+    keep only those whose basename names that disc (`\b(?:cd|disc|disk|d)\s*0*<n>\b`), falling
+    back to all if none match. Disc number from `$track->disc`, else parsed from the playing
+    filename then its folder name (`_nowPlaying` replaces `_nowPlayingFolder`, now returns
+    `($folder,$disc)`).
+  - **Multi-PDF chooser** now ids each entry by `_pdfLabels` = basename, or `<parent>/<basename>`
+    when basenames collide across subfolders (fixes a latent same-name `?file=` ambiguity; still
+    matched only against our own regenerated candidate list, so no traversal).
+  - **iframe mode removed** — the action always writes `weblink` (new browser tab). Material's
+    in-app iframe dialog stranded multi-page booklets on page 1 (no page controls); the browser's
+    native PDF viewer pages through them. `open_mode` pref + Settings row + MODE_* strings dropped;
+    `_isOurAction` still checks the `iframe` field too, so a pre-0.1.1 iframe entry is stripped on
+    upgrade. Behavioural test of all layouts: `scratchpad/t2.pl` (A per-disc folders, B subfolder,
+    C flat per-disc, D boxset-root, E/F no-booklet → none).
 - **0.1.0** — Initial build: Now Playing "View Booklet" Material custom action (`track` category,
   keyed on `$ID`) + raw HTTP handler serving the playing album's folder PDF inline;
   iframe/weblink toggle; multi-PDF chooser; no-booklet / no-local-track message pages.
